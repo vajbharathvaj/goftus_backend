@@ -208,6 +208,10 @@ app.post("/api/subscribe", async (req, res) => {
                    style="background-color: #38bdf8; color: #0f172a; padding: 12px 24px; border-radius: 8px; font-weight: bold; text-decoration: none;">
                   Contact Us
                 </a>
+                <a href="${process.env.BASE_URL}/api/unsubscribe?email=${encodeURIComponent(email)}"
+   style="display:inline-block; margin-top:20px; color:#94a3b8; font-size:13px; text-decoration:underline;">
+   Unsubscribe from future emails
+</a>
               </div>
             </div>
 
@@ -238,4 +242,111 @@ const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
+});
+app.get("/api/unsubscribe", async (req, res) => {
+  try {
+    const email = req.query.email;
+
+    // 🔒 Step 1: Validate query parameter
+    if (!email || !email.includes("@")) {
+      console.warn("❌ Invalid unsubscribe request - missing or invalid email");
+      return res.status(400).send("Invalid unsubscribe link.");
+    }
+
+    console.log("📩 Unsubscribe request for:", email);
+
+    // 🔍 Step 2: Check if the user exists
+    const { data: userData, error: fetchError } = await supabase
+      .from("contacts")
+      .select("*")
+      .eq("email", email);
+
+    if (fetchError) {
+      console.error("❌ Database fetch error:", fetchError.message);
+      return res.status(500).send("Internal server error.");
+    }
+
+    if (!userData || userData.length === 0) {
+      console.warn("⚠️ No user found for:", email);
+      return res.status(404).send("Email not found in database.");
+    }
+
+    const user = userData[0];
+
+    // 🚫 Step 3: If already unsubscribed
+    if (user.subscription === false) {
+      console.log("ℹ️ Already unsubscribed:", email);
+      return res
+        .status(200)
+        .send(
+          `<html>
+            <body style="font-family:Arial,sans-serif; background:#f9fafb; text-align:center; padding:50px;">
+              <h2 style="color:#1E3A8A;">You’re already unsubscribed!</h2>
+              <p style="color:#4B5563;">We won't send further updates to <b>${email}</b>.</p>
+            </body>
+          </html>`
+        );
+    }
+
+    // ✏️ Step 4: Update subscription to false
+    const { error: updateError } = await supabase
+      .from("contacts")
+      .update({ subscription: false })
+      .eq("email", email);
+
+    if (updateError) {
+      console.error("❌ Unsubscribe update error:", updateError.message);
+      return res.status(500).send("Failed to update subscription.");
+    }
+
+    console.log("✅ Subscription marked false for:", email);
+
+    // ✉️ Step 5: Send confirmation email
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: process.env.MAIL_USER,
+        pass: process.env.MAIL_PASS,
+      },
+    });
+
+    const mailOptions = {
+      from: `"Goftus AI" <${process.env.MAIL_USER}>`,
+      to: email,
+      subject: "You’ve been unsubscribed from Goftus AI updates",
+      html: `
+        <div style="font-family:Arial,sans-serif; background-color:#f9fafb; padding:30px;">
+          <div style="max-width:600px;margin:auto;background:white;border-radius:12px;padding:20px;">
+            <h2 style="color:#1E3A8A;text-align:center;">Unsubscribed Successfully</h2>
+            <p style="color:#374151;text-align:center;">We’ve removed <b>${email}</b> from our mailing list.</p>
+            <p style="font-size:14px;color:#6B7280;text-align:center;">If this was a mistake, you can resubscribe anytime on our website.</p>
+            <div style="text-align:center;margin-top:30px;">
+              <a href="https://goftus.com" 
+                 style="background:#1E3A8A;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;">
+                Visit Goftus
+              </a>
+            </div>
+          </div>
+        </div>
+      `,
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log("📨 Confirmation email sent to:", email);
+
+    // ✅ Step 6: Send browser confirmation page
+    return res
+      .status(200)
+      .send(
+        `<html>
+          <body style="font-family:Arial,sans-serif; background:#f9fafb; text-align:center; padding:50px;">
+            <h2 style="color:#1E3A8A;">You’ve been unsubscribed.</h2>
+            <p style="color:#4B5563;">We’re sorry to see you go! A confirmation email was sent to <b>${email}</b>.</p>
+          </body>
+        </html>`
+      );
+  } catch (err) {
+    console.error("❌ Unsubscribe processing error:", err);
+    res.status(500).send("Internal server error.");
+  }
 });
