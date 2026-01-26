@@ -6,6 +6,7 @@ import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import path from "path";
 import { fileURLToPath } from "url";
+import bcrypt from "bcryptjs";
 
 // 2️⃣ Load environment variables from .env file
 dotenv.config();
@@ -29,6 +30,293 @@ const app = express();
 // 4️⃣ Middlewares (to parse JSON and allow cross-origin requests)
 app.use(cors());
 app.use(express.json());
+
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "goftus-admin-token";
+
+const encodeAdminToken = (email) =>
+  `${ADMIN_TOKEN}.${Buffer.from(email).toString("base64")}`;
+
+const decodeAdminEmail = (token) => {
+  if (!token.startsWith(`${ADMIN_TOKEN}.`)) return null;
+  const encoded = token.slice(ADMIN_TOKEN.length + 1);
+  try {
+    return Buffer.from(encoded, "base64").toString("utf8");
+  } catch (err) {
+    return null;
+  }
+};
+
+const findAdminByEmail = async (email) => {
+  if (!email) return null;
+  if (ADMIN_EMAIL && email === ADMIN_EMAIL) {
+    return { email, isSuperAdmin: true };
+  }
+  const { data, error } = await supabase
+    .from("admin_users")
+    .select("id,email")
+    .eq("email", email)
+    .maybeSingle();
+  if (error || !data) return null;
+  return { ...data, isSuperAdmin: false };
+};
+
+const requireAdmin = async (req, res, next) => {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader;
+
+  if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
+    return res.status(500).json({ error: "Admin credentials not configured" });
+  }
+
+  if (!token) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const email = decodeAdminEmail(token);
+  const admin = await findAdminByEmail(email);
+  if (!admin) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  req.adminEmail = admin.email;
+  req.isSuperAdmin = admin.isSuperAdmin;
+  return next();
+};
+
+const requireSuperAdmin = async (req, res, next) => {
+  await requireAdmin(req, res, () => {
+    if (!req.isSuperAdmin) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    return next();
+  });
+};
+
+const parsePagination = (req) => {
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 9, 1), 50);
+  const from = (page - 1) * limit;
+  const to = from + limit - 1;
+  return { page, limit, from, to };
+};
+
+// --- Blog Admin Auth ---
+app.post("/api/admin/login", async (req, res) => {
+  const { email, username, password } = req.body || {};
+  const candidate = email || username;
+
+  if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
+    return res.status(500).json({ error: "Admin credentials not configured" });
+  }
+
+  if (candidate === ADMIN_EMAIL && password === ADMIN_PASSWORD) {
+    return res.json({
+      token: encodeAdminToken(candidate),
+      email: candidate,
+      isSuperAdmin: true,
+    });
+  }
+
+  const { data, error } = await supabase
+    .from("admin_users")
+    .select("id,email,password_hash")
+    .eq("email", candidate)
+    .maybeSingle();
+
+  if (error || !data) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+
+  const valid = await bcrypt.compare(password || "", data.password_hash || "");
+  if (!valid) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+
+  return res.json({
+    token: encodeAdminToken(data.email),
+    email: data.email,
+    isSuperAdmin: false,
+  });
+});
+
+// --- Public Blog Endpoints ---
+app.get("/api/posts", async (req, res) => {
+  const { page, limit, from, to } = parsePagination(req);
+
+  const { data, error, count } = await supabase
+    .from("posts")
+    .select("*", { count: "exact" })
+    .eq("status", "published")
+    .order("published_at", { ascending: false, nullsLast: true })
+    .range(from, to);
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  const totalPages = count ? Math.ceil(count / limit) : 1;
+  return res.json({ posts: data || [], page, totalPages, total: count || 0 });
+});
+
+app.get("/api/posts/:slug", async (req, res) => {
+  const { slug } = req.params;
+  const { data, error } = await supabase
+    .from("posts")
+    .select("*")
+    .eq("slug", slug)
+    .eq("status", "published")
+    .single();
+
+  if (error || !data) {
+    return res.status(404).json({ error: "Post not found" });
+  }
+
+  return res.json(data);
+});
+
+// --- Admin Blog Endpoints ---
+app.get("/api/admin/posts", requireAdmin, async (req, res) => {
+  const { data, error, count } = await supabase
+    .from("posts")
+    .select("*", { count: "exact" })
+    .order("updated_at", { ascending: false, nullsLast: true });
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json({ posts: data || [], total: count || 0 });
+});
+
+app.post("/api/admin/posts", requireAdmin, async (req, res) => {
+  const payload = req.body || {};
+  if (!payload.title || !payload.slug) {
+    return res.status(400).json({ error: "Missing title or slug" });
+  }
+
+  const { data, error } = await supabase.from("posts").insert([payload]).select("*").single();
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json(data);
+});
+
+app.put("/api/admin/posts/:id", requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const payload = req.body || {};
+
+  const { data, error } = await supabase
+    .from("posts")
+    .update(payload)
+    .eq("id", id)
+    .select("*")
+    .single();
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json(data);
+});
+
+app.delete("/api/admin/posts/:id", requireAdmin, async (req, res) => {
+  const { id } = req.params;
+
+  const { error } = await supabase.from("posts").delete().eq("id", id);
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json({ success: true });
+});
+
+app.post("/api/admin/posts/:id/publish", requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const payload = { status: "published", published_at: new Date().toISOString() };
+
+  const { data, error } = await supabase
+    .from("posts")
+    .update(payload)
+    .eq("id", id)
+    .select("*")
+    .single();
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json(data);
+});
+
+app.post("/api/admin/posts/:id/unpublish", requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const payload = { status: "draft", published_at: null };
+
+  const { data, error } = await supabase
+    .from("posts")
+    .update(payload)
+    .eq("id", id)
+    .select("*")
+    .single();
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json(data);
+});
+
+// --- Admin Users (Super Admin Only) ---
+app.get("/api/admin/users", requireSuperAdmin, async (req, res) => {
+  const { data, error } = await supabase
+    .from("admin_users")
+    .select("id,email,created_at")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json({ users: data || [] });
+});
+
+app.post("/api/admin/users", requireSuperAdmin, async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) {
+    return res.status(400).json({ error: "Email and password are required" });
+  }
+
+  if (ADMIN_EMAIL && email === ADMIN_EMAIL) {
+    return res.status(400).json({ error: "Cannot add primary admin here" });
+  }
+
+  const password_hash = await bcrypt.hash(password, 10);
+  const { data, error } = await supabase
+    .from("admin_users")
+    .insert([{ email, password_hash }])
+    .select("id,email,created_at")
+    .single();
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json(data);
+});
+
+app.delete("/api/admin/users/:id", requireSuperAdmin, async (req, res) => {
+  const { id } = req.params;
+
+  const { error } = await supabase.from("admin_users").delete().eq("id", id);
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json({ success: true });
+});
 
 // 5️⃣ Define the route that handles the form submission
 // 📨 Contact Form API Route
@@ -208,6 +496,7 @@ app.post("/api/subscribe", async (req, res) => {
                    style="background-color: #38bdf8; color: #0f172a; padding: 12px 24px; border-radius: 8px; font-weight: bold; text-decoration: none;">
                   Contact Us
                 </a>
+                <br>
                 <a href="${process.env.BASE_URL}/api/unsubscribe?email=${encodeURIComponent(email)}"
    style="display:inline-block; margin-top:20px; color:#94a3b8; font-size:13px; text-decoration:underline;">
    Unsubscribe from future emails
