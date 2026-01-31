@@ -29,7 +29,8 @@ const app = express();
 
 // 4️⃣ Middlewares (to parse JSON and allow cross-origin requests)
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
@@ -176,6 +177,25 @@ app.get("/api/posts/:slug", async (req, res) => {
   return res.json(data);
 });
 
+// --- Public Products Endpoint ---
+app.get("/api/products", async (req, res) => {
+  const { subtitle, status } = req.query;
+  let query = supabase.from("products").select("*").order("created_at", { ascending: false });
+
+  if (subtitle) {
+    query = query.eq("subtitle", subtitle);
+  }
+  if (status) {
+    query = query.eq("status", status);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+  return res.json({ products: data || [] });
+});
+
 // --- Admin Blog Endpoints ---
 app.get("/api/admin/posts", requireAdmin, async (req, res) => {
   const { data, error, count } = await supabase
@@ -267,6 +287,92 @@ app.post("/api/admin/posts/:id/unpublish", requireAdmin, async (req, res) => {
   }
 
   return res.json(data);
+});
+
+// --- Admin Products Endpoints ---
+app.get("/api/admin/products", requireAdmin, async (req, res) => {
+  const { data, error } = await supabase
+    .from("products")
+    .select("*")
+    .order("updated_at", { ascending: false, nullsLast: true });
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json({ products: data || [] });
+});
+
+app.post("/api/admin/products", requireAdmin, async (req, res) => {
+  const payload = req.body || {};
+  if (!payload.name || !payload.description) {
+    return res.status(400).json({ error: "Missing name or description" });
+  }
+
+  const { data, error } = await supabase.from("products").insert([payload]).select("*").single();
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json(data);
+});
+
+app.post("/api/admin/products/upload-image", requireAdmin, async (req, res) => {
+  const { dataUrl, filename } = req.body || {};
+  if (!dataUrl || !filename) {
+    return res.status(400).json({ error: "Missing dataUrl or filename" });
+  }
+
+  const match = String(dataUrl).match(/^data:(.+);base64,(.+)$/);
+  if (!match) {
+    return res.status(400).json({ error: "Invalid data URL" });
+  }
+
+  const contentType = match[1];
+  const base64 = match[2];
+  const buffer = Buffer.from(base64, "base64");
+  const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const objectPath = `products/${Date.now()}-${safeName}`;
+
+  const { error } = await supabase.storage
+    .from("product-images")
+    .upload(objectPath, buffer, { contentType, upsert: true });
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  const { data } = supabase.storage.from("product-images").getPublicUrl(objectPath);
+  return res.json({ url: data.publicUrl });
+});
+
+app.put("/api/admin/products/:id", requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const payload = req.body || {};
+
+  const { data, error } = await supabase
+    .from("products")
+    .update(payload)
+    .eq("id", id)
+    .select("*")
+    .single();
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json(data);
+});
+
+app.delete("/api/admin/products/:id", requireAdmin, async (req, res) => {
+  const { id } = req.params;
+
+  const { error } = await supabase.from("products").delete().eq("id", id);
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json({ success: true });
 });
 
 // --- Admin Users (Super Admin Only) ---
