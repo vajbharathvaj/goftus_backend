@@ -196,6 +196,23 @@ app.get("/api/products", async (req, res) => {
   return res.json({ products: data || [] });
 });
 
+// --- Public Banner Endpoint ---
+app.get("/api/banner", async (req, res) => {
+  const { data, error } = await supabase
+    .from("banners")
+    .select("*")
+    .eq("is_active", true)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json(data || null);
+});
+
 // --- Admin Blog Endpoints ---
 app.get("/api/admin/posts", requireAdmin, async (req, res) => {
   const { data, error, count } = await supabase
@@ -375,6 +392,125 @@ app.delete("/api/admin/products/:id", requireAdmin, async (req, res) => {
   return res.json({ success: true });
 });
 
+// --- Admin Banner Endpoints ---
+app.get("/api/admin/banners", requireAdmin, async (req, res) => {
+  const { data, error } = await supabase
+    .from("banners")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json({ banners: data || [] });
+});
+
+app.post("/api/admin/banners", requireAdmin, async (req, res) => {
+  const { product, message, href, is_active } = req.body || {};
+  if (!product || !message) {
+    return res.status(400).json({ error: "Missing product or message" });
+  }
+
+  const payload = {
+    product,
+    message,
+    href: href || null,
+    is_active: Boolean(is_active),
+  };
+
+  const { data, error } = await supabase
+    .from("banners")
+    .insert([payload])
+    .select("*")
+    .single();
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  if (payload.is_active) {
+    await supabase.from("banners").update({ is_active: false }).neq("id", data.id);
+  }
+
+  return res.json(data);
+});
+
+app.put("/api/admin/banners/:id", requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { product, message, href, is_active } = req.body || {};
+
+  const payload = {};
+  if (typeof product === "string") payload.product = product;
+  if (typeof message === "string") payload.message = message;
+  if (typeof href === "string" || href === null) payload.href = href || null;
+  if (typeof is_active === "boolean") payload.is_active = is_active;
+
+  if (payload.is_active === true) {
+    await supabase.from("banners").update({ is_active: false }).neq("id", id);
+  }
+
+  const { data, error } = await supabase
+    .from("banners")
+    .update(payload)
+    .eq("id", id)
+    .select("*")
+    .single();
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json(data);
+});
+
+app.post("/api/admin/banners/:id/activate", requireAdmin, async (req, res) => {
+  const { id } = req.params;
+
+  await supabase.from("banners").update({ is_active: false }).neq("id", id);
+
+  const { data, error } = await supabase
+    .from("banners")
+    .update({ is_active: true })
+    .eq("id", id)
+    .select("*")
+    .single();
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json(data);
+});
+
+app.post("/api/admin/banners/:id/deactivate", requireAdmin, async (req, res) => {
+  const { id } = req.params;
+
+  const { data, error } = await supabase
+    .from("banners")
+    .update({ is_active: false })
+    .eq("id", id)
+    .select("*")
+    .single();
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json(data);
+});
+
+app.delete("/api/admin/banners/:id", requireAdmin, async (req, res) => {
+  const { id } = req.params;
+
+  const { error } = await supabase.from("banners").delete().eq("id", id);
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json({ success: true });
+});
+
 // --- Admin Users (Super Admin Only) ---
 app.get("/api/admin/users", requireSuperAdmin, async (req, res) => {
   const { data, error } = await supabase
@@ -472,13 +608,66 @@ app.post("/api/contact", async (req, res) => {
 
     if (error) {
       console.error("Supabase insert error:", error);
-      return res.status(500).json({ error: "Failed to save to database" });
+      return res.status(500).json({
+        error: "Failed to save to database",
+        detail: error.message || error,
+        source: "supabase_insert",
+      });
     }
 
     res.json({ success: true });
   } catch (err) {
     console.error("Error:", err);
-    res.status(500).json({ error: "Failed to process request" });
+    res.status(500).json({
+      error: "Failed to process request",
+      detail: err?.message || err,
+      source: "contact_handler",
+    });
+  }
+});
+
+// 📨 Automation Prompt API Route
+app.post("/api/automation-inquiry", async (req, res) => {
+  const { choice, phone } = req.body || {};
+
+  if (!choice) {
+    return res.status(400).json({ error: "Missing choice" });
+  }
+
+  if ((choice === "yes" || choice === "maybe") && !phone) {
+    return res.status(400).json({ error: "Missing phone number" });
+  }
+
+  try {
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: process.env.MAIL_USER,
+        pass: process.env.MAIL_PASS,
+      },
+    });
+
+    const mailOptions = {
+      from: `"Automation Prompt" <${process.env.MAIL_USER}>`,
+      to: process.env.RECEIVER_MAIL,
+      subject: "New AI Automation Inquiry",
+      html: `
+        <h2>AI Automation Inquiry</h2>
+        <p><b>Answer:</b> ${choice}</p>
+        <p><b>Mobile:</b> ${phone || "N/A"}</p>
+      `,
+    };
+
+    await transporter.sendMail(mailOptions);
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Automation inquiry error:", err);
+    return res.status(500).json({
+      error: "Failed to process request",
+      detail: err?.message || err,
+      source: "automation_inquiry",
+    });
   }
 });
 
