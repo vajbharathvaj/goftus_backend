@@ -569,32 +569,40 @@ app.post("/api/contact", async (req, res) => {
     return res.status(400).json({ error: "Missing required fields" });
 
   try {
-    // 1️⃣ Send email
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: process.env.MAIL_USER,
-        pass: process.env.MAIL_PASS,
-      },
-    });
+    // Send email (best effort so SMTP timeouts don't fail the API)
+    let emailSent = false;
+    if (process.env.MAIL_DISABLE !== "true") {
+      try {
+        const transporter = nodemailer.createTransport({
+          service: "gmail",
+          auth: {
+            user: process.env.MAIL_USER,
+            pass: process.env.MAIL_PASS,
+          },
+        });
 
-    const mailOptions = {
-      from: `"Website Contact" <${process.env.MAIL_USER}>`,
-      to: process.env.RECEIVER_MAIL,
-      subject: `New contact from ${fullName}`,
-      html: `
-        <h2>New Contact Submission</h2>
-        <p><b>Name:</b> ${fullName}</p>
-        <p><b>Email:</b> ${email}</p>
-        <p><b>Company:</b> ${company || "N/A"}</p>
-        <p><b>Need:</b> ${need || "N/A"}</p>
-        <p><b>Message:</b><br/>${message}</p>
-      `,
-    };
+        const mailOptions = {
+          from: `"Website Contact" <${process.env.MAIL_USER}>`,
+          to: process.env.RECEIVER_MAIL,
+          subject: `New contact from ${fullName}`,
+          html: `
+            <h2>New Contact Submission</h2>
+            <p><b>Name:</b> ${fullName}</p>
+            <p><b>Email:</b> ${email}</p>
+            <p><b>Company:</b> ${company || "N/A"}</p>
+            <p><b>Need:</b> ${need || "N/A"}</p>
+            <p><b>Message:</b><br/>${message}</p>
+          `,
+        };
 
-    await transporter.sendMail(mailOptions);
+        await transporter.sendMail(mailOptions);
+        emailSent = true;
+      } catch (err) {
+        console.error("Contact email error:", err);
+      }
+    }
 
-    // 2️⃣ Save in Supabase
+    // Save in Supabase
     const { data, error } = await supabase.from("contacts").insert([
       {
         full_name: fullName,
@@ -615,7 +623,7 @@ app.post("/api/contact", async (req, res) => {
       });
     }
 
-    res.json({ success: true });
+    res.json({ success: true, emailSent });
   } catch (err) {
     console.error("Error:", err);
     res.status(500).json({
@@ -626,7 +634,7 @@ app.post("/api/contact", async (req, res) => {
   }
 });
 
-// 📨 Automation Prompt API Route
+// Automation Prompt API Route
 app.post("/api/automation-inquiry", async (req, res) => {
   const { choice, phone } = req.body || {};
 
@@ -639,28 +647,36 @@ app.post("/api/automation-inquiry", async (req, res) => {
   }
 
   try {
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: process.env.MAIL_USER,
-        pass: process.env.MAIL_PASS,
-      },
-    });
+    let emailSent = false;
+    if (process.env.MAIL_DISABLE !== "true") {
+      try {
+        const transporter = nodemailer.createTransport({
+          service: "gmail",
+          auth: {
+            user: process.env.MAIL_USER,
+            pass: process.env.MAIL_PASS,
+          },
+        });
 
-    const mailOptions = {
-      from: `"Automation Prompt" <${process.env.MAIL_USER}>`,
-      to: process.env.RECEIVER_MAIL,
-      subject: "New AI Automation Inquiry",
-      html: `
-        <h2>AI Automation Inquiry</h2>
-        <p><b>Answer:</b> ${choice}</p>
-        <p><b>Mobile:</b> ${phone || "N/A"}</p>
-      `,
-    };
+        const mailOptions = {
+          from: `"Automation Prompt" <${process.env.MAIL_USER}>`,
+          to: process.env.RECEIVER_MAIL,
+          subject: "New AI Automation Inquiry",
+          html: `
+            <h2>AI Automation Inquiry</h2>
+            <p><b>Answer:</b> ${choice}</p>
+            <p><b>Mobile:</b> ${phone || "N/A"}</p>
+          `,
+        };
 
-    await transporter.sendMail(mailOptions);
+        await transporter.sendMail(mailOptions);
+        emailSent = true;
+      } catch (err) {
+        console.error("Automation inquiry email error:", err);
+      }
+    }
 
-    return res.json({ success: true });
+    return res.json({ success: true, emailSent });
   } catch (err) {
     console.error("Automation inquiry error:", err);
     return res.status(500).json({
