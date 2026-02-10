@@ -1,12 +1,13 @@
 // 1️⃣ Import all required packages
 import express from "express";
 import cors from "cors";
-import nodemailer from "nodemailer";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import path from "path";
 import { fileURLToPath } from "url";
 import bcrypt from "bcryptjs";
+import fs from "fs/promises";
+import nodemailer from "nodemailer";
 
 // 2️⃣ Load environment variables from .env file
 dotenv.config();
@@ -101,6 +102,68 @@ const parsePagination = (req) => {
   const from = (page - 1) * limit;
   const to = from + limit - 1;
   return { page, limit, from, to };
+};
+
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const SMTP_FROM = process.env.SMTP_FROM;
+const SMTP_TO = process.env.SMTP_TO;
+
+const readFileBase64 = async (filePath) => {
+  try {
+    const data = await fs.readFile(filePath);
+    return data.toString("base64");
+  } catch (err) {
+    console.error("Attachment read error:", err);
+    return null;
+  }
+};
+
+const sendSmtpEmail = async ({ to, subject, html, replyTo, attachments }) => {
+  if (!SMTP_USER || !SMTP_PASS || !SMTP_FROM || !SMTP_TO) {
+    return { sent: false, skipped: true, reason: "smtp_not_configured" };
+  }
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: "smtp.gmail.com",
+      port: 587,
+      secure: false,
+      auth: {
+        user: SMTP_USER,
+        pass: SMTP_PASS,
+      },
+    });
+
+    const mailOptions = {
+      from: SMTP_FROM,
+      to: to || SMTP_TO,
+      subject,
+      html,
+    };
+
+    if (replyTo) {
+      mailOptions.replyTo = replyTo;
+    }
+
+    if (attachments && attachments.length > 0) {
+      mailOptions.attachments = attachments;
+    }
+
+    const info = await transporter.sendMail(mailOptions);
+    return { sent: true, id: info?.messageId };
+  } catch (err) {
+    console.error("SMTP email error:", err);
+    return { sent: false, error: err?.message || err };
+  }
+};
+
+const sendEmailBestEffort = async ({ to, subject, html, replyTo, attachments }) => {
+  if (process.env.MAIL_DISABLE === "true") {
+    return { sent: false, skipped: true, reason: "mail_disabled" };
+  }
+
+  return sendSmtpEmail({ to, subject, html, replyTo, attachments });
 };
 
 // --- Blog Admin Auth ---
@@ -569,38 +632,19 @@ app.post("/api/contact", async (req, res) => {
     return res.status(400).json({ error: "Missing required fields" });
 
   try {
-    // Send email (best effort so SMTP timeouts don't fail the API)
-    let emailSent = false;
-    if (process.env.MAIL_DISABLE !== "true") {
-      try {
-        const transporter = nodemailer.createTransport({
-          service: "gmail",
-          auth: {
-            user: process.env.MAIL_USER,
-            pass: process.env.MAIL_PASS,
-          },
-        });
-
-        const mailOptions = {
-          from: `"Website Contact" <${process.env.MAIL_USER}>`,
-          to: process.env.RECEIVER_MAIL,
-          subject: `New contact from ${fullName}`,
-          html: `
-            <h2>New Contact Submission</h2>
-            <p><b>Name:</b> ${fullName}</p>
-            <p><b>Email:</b> ${email}</p>
-            <p><b>Company:</b> ${company || "N/A"}</p>
-            <p><b>Need:</b> ${need || "N/A"}</p>
-            <p><b>Message:</b><br/>${message}</p>
-          `,
-        };
-
-        await transporter.sendMail(mailOptions);
-        emailSent = true;
-      } catch (err) {
-        console.error("Contact email error:", err);
-      }
-    }
+    const emailResult = await sendEmailBestEffort({
+      to: process.env.RECEIVER_MAIL,
+      subject: `New contact from ${fullName}`,
+      html: `
+        <h2>New Contact Submission</h2>
+        <p><b>Name:</b> ${fullName}</p>
+        <p><b>Email:</b> ${email}</p>
+        <p><b>Company:</b> ${company || "N/A"}</p>
+        <p><b>Need:</b> ${need || "N/A"}</p>
+        <p><b>Message:</b><br/>${message}</p>
+      `,
+      replyTo: email,
+    });
 
     // Save in Supabase
     const { data, error } = await supabase.from("contacts").insert([
@@ -623,7 +667,7 @@ app.post("/api/contact", async (req, res) => {
       });
     }
 
-    res.json({ success: true, emailSent });
+    res.json({ success: true, emailSent: emailResult.sent });
   } catch (err) {
     console.error("Error:", err);
     res.status(500).json({
@@ -647,36 +691,17 @@ app.post("/api/automation-inquiry", async (req, res) => {
   }
 
   try {
-    let emailSent = false;
-    if (process.env.MAIL_DISABLE !== "true") {
-      try {
-        const transporter = nodemailer.createTransport({
-          service: "gmail",
-          auth: {
-            user: process.env.MAIL_USER,
-            pass: process.env.MAIL_PASS,
-          },
-        });
+    const emailResult = await sendEmailBestEffort({
+      to: process.env.RECEIVER_MAIL,
+      subject: "New AI Automation Inquiry",
+      html: `
+        <h2>AI Automation Inquiry</h2>
+        <p><b>Answer:</b> ${choice}</p>
+        <p><b>Mobile:</b> ${phone || "N/A"}</p>
+      `,
+    });
 
-        const mailOptions = {
-          from: `"Automation Prompt" <${process.env.MAIL_USER}>`,
-          to: process.env.RECEIVER_MAIL,
-          subject: "New AI Automation Inquiry",
-          html: `
-            <h2>AI Automation Inquiry</h2>
-            <p><b>Answer:</b> ${choice}</p>
-            <p><b>Mobile:</b> ${phone || "N/A"}</p>
-          `,
-        };
-
-        await transporter.sendMail(mailOptions);
-        emailSent = true;
-      } catch (err) {
-        console.error("Automation inquiry email error:", err);
-      }
-    }
-
-    return res.json({ success: true, emailSent });
+    return res.json({ success: true, emailSent: emailResult.sent });
   } catch (err) {
     console.error("Automation inquiry error:", err);
     return res.status(500).json({
@@ -756,28 +781,22 @@ app.post("/api/subscribe", async (req, res) => {
       console.log("✅ Added new subscriber:", email);
     }
 
-    // 4️⃣ Always send Welcome Email
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: process.env.MAIL_USER,
-        pass: process.env.MAIL_PASS,
-      },
-    });
-
+    // Always send Welcome Email
     const logoPath = path.join(__dirname, "assets", "goftus-logo.jpg");
+    const logoBase64 = await readFileBase64(logoPath);
+    const attachments = logoBase64
+      ? [
+          {
+            filename: "goftus-logo.jpg",
+            content: logoBase64,
+            contentId: "goftuslogo",
+          },
+        ]
+      : [];
 
-    const mailOptions = {
-      from: `"Goftus AI" <${process.env.MAIL_USER}>`,
+    const emailResult = await sendEmailBestEffort({
       to: email,
-      subject: "🎉 Welcome to Goftus AI!",
-      attachments: [
-        {
-          filename: "goftus-logo.jpg",
-          path: logoPath,
-          cid: "goftuslogo",
-        },
-      ],
+      subject: "Welcome to Goftus AI!",
       html: `
         <div style="font-family: Arial, sans-serif; background-color: #0f172a; padding: 40px;">
           <div style="max-width: 600px; margin: auto; background: #1e293b; border-radius: 12px; overflow: hidden;">
@@ -794,12 +813,12 @@ app.post("/api/subscribe", async (req, res) => {
                 At <strong style="color: #38bdf8;">Goftus</strong>, we help you build, ship, and scale with advanced AI solutions like:
               </p>
               <ul style="color: #e2e8f0; font-size: 15px; line-height: 1.8;">
-                <li><b>🤖 Agentic AI</b> — automate business workflows intelligently</li>
-                <li><b>🚀 AI Products</b> — design, deploy, and scale effortlessly</li>
-                <li><b>⚙️ Smart Integrations</b> — bring AI seamlessly into your stack</li>
+                <li><b>Agentic AI</b> - automate business workflows intelligently</li>
+                <li><b>AI Products</b> - design, deploy, and scale effortlessly</li>
+                <li><b>Smart Integrations</b> - bring AI seamlessly into your stack</li>
               </ul>
               <p style="color: #cbd5e1; margin-top: 15px;">
-                Let’s shape the future of AI — together.
+                Let's shape the future of AI - together.
               </p>
 
               <div style="text-align: center; margin-top: 30px;">
@@ -817,20 +836,22 @@ app.post("/api/subscribe", async (req, res) => {
 
             <div style="background: #0f172a; text-align: center; padding: 15px;">
               <p style="color: #64748b; font-size: 12px;">
-                © ${new Date().getFullYear()} Goftus AI. All rights reserved.
+                (c) ${new Date().getFullYear()} Goftus AI. All rights reserved.
               </p>
             </div>
           </div>
         </div>
       `,
-    };
+      attachments,
+    });
 
-    await transporter.sendMail(mailOptions);
-    console.log("✅ Welcome email sent to:", email);
+    if (!emailResult.sent) {
+      console.error("Welcome email failed:", emailResult.error || emailResult.reason);
+    }
 
     return res.json({
       success: true,
-      message: "Subscription activated and welcome email sent!",
+      emailSent: emailResult.sent,
     });
   } catch (err) {
     console.error("❌ Error processing subscription:", err);
@@ -901,24 +922,15 @@ app.get("/api/unsubscribe", async (req, res) => {
 
     console.log("✅ Subscription marked false for:", email);
 
-    // ✉️ Step 5: Send confirmation email
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: process.env.MAIL_USER,
-        pass: process.env.MAIL_PASS,
-      },
-    });
-
-    const mailOptions = {
-      from: `"Goftus AI" <${process.env.MAIL_USER}>`,
+    // Send confirmation email
+    const emailResult = await sendEmailBestEffort({
       to: email,
-      subject: "You’ve been unsubscribed from Goftus AI updates",
+      subject: "You've been unsubscribed from Goftus AI updates",
       html: `
         <div style="font-family:Arial,sans-serif; background-color:#f9fafb; padding:30px;">
           <div style="max-width:600px;margin:auto;background:white;border-radius:12px;padding:20px;">
             <h2 style="color:#1E3A8A;text-align:center;">Unsubscribed Successfully</h2>
-            <p style="color:#374151;text-align:center;">We’ve removed <b>${email}</b> from our mailing list.</p>
+            <p style="color:#374151;text-align:center;">We've removed <b>${email}</b> from our mailing list.</p>
             <p style="font-size:14px;color:#6B7280;text-align:center;">If this was a mistake, you can resubscribe anytime on our website.</p>
             <div style="text-align:center;margin-top:30px;">
               <a href="https://goftus.com" 
@@ -929,19 +941,20 @@ app.get("/api/unsubscribe", async (req, res) => {
           </div>
         </div>
       `,
-    };
+    });
 
-    await transporter.sendMail(mailOptions);
-    console.log("📨 Confirmation email sent to:", email);
+    if (!emailResult.sent) {
+      console.error("Unsubscribe confirmation email failed:", emailResult.error || emailResult.reason);
+    }
 
-    // ✅ Step 6: Send browser confirmation page
+    // Step 6: Send browser confirmation page
     return res
       .status(200)
       .send(
         `<html>
           <body style="font-family:Arial,sans-serif; background:#f9fafb; text-align:center; padding:50px;">
             <h2 style="color:#1E3A8A;">You’ve been unsubscribed.</h2>
-            <p style="color:#4B5563;">We’re sorry to see you go! A confirmation email was sent to <b>${email}</b>.</p>
+            <p style="color:#4B5563;">We’re sorry to see you go! If enabled, a confirmation email was sent to <b>${email}</b>.</p>
           </body>
         </html>`
       );
