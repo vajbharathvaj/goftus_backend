@@ -7,7 +7,6 @@ import path from "path";
 import { fileURLToPath } from "url";
 import bcrypt from "bcryptjs";
 import fs from "fs/promises";
-import nodemailer from "nodemailer";
 
 // 2️⃣ Load environment variables from .env file
 dotenv.config();
@@ -104,10 +103,8 @@ const parsePagination = (req) => {
   return { page, limit, from, to };
 };
 
-const SMTP_USER = process.env.SMTP_USER;
-const SMTP_PASS = process.env.SMTP_PASS;
-const SMTP_FROM = process.env.SMTP_FROM;
-const SMTP_TO = process.env.SMTP_TO;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const RESEND_FROM = process.env.RESEND_FROM;
 
 const readFileBase64 = async (filePath) => {
   try {
@@ -119,42 +116,52 @@ const readFileBase64 = async (filePath) => {
   }
 };
 
-const sendSmtpEmail = async ({ to, subject, html, replyTo, attachments }) => {
-  if (!SMTP_USER || !SMTP_PASS || !SMTP_FROM || !SMTP_TO) {
-    return { sent: false, skipped: true, reason: "smtp_not_configured" };
+const sendResendEmail = async ({ to, subject, html, replyTo, attachments }) => {
+  if (!RESEND_API_KEY || !RESEND_FROM) {
+    return { sent: false, skipped: true, reason: "resend_not_configured" };
   }
 
-  try {
-    const transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 587,
-      secure: false,
-      auth: {
-        user: SMTP_USER,
-        pass: SMTP_PASS,
-      },
-    });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
 
-    const mailOptions = {
-      from: SMTP_FROM,
-      to: to || SMTP_TO,
+  try {
+    const body = {
+      from: RESEND_FROM,
+      to: Array.isArray(to) ? to : [to],
       subject,
       html,
     };
 
     if (replyTo) {
-      mailOptions.replyTo = replyTo;
+      body.replyTo = replyTo;
     }
 
     if (attachments && attachments.length > 0) {
-      mailOptions.attachments = attachments;
+      body.attachments = attachments;
     }
 
-    const info = await transporter.sendMail(mailOptions);
-    return { sent: true, id: info?.messageId };
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      console.error("Resend email error:", payload || response.statusText);
+      return { sent: false, error: payload || response.statusText };
+    }
+
+    return { sent: true, id: payload?.id };
   } catch (err) {
-    console.error("SMTP email error:", err);
+    console.error("Resend email error:", err);
     return { sent: false, error: err?.message || err };
+  } finally {
+    clearTimeout(timeout);
   }
 };
 
@@ -163,7 +170,7 @@ const sendEmailBestEffort = async ({ to, subject, html, replyTo, attachments }) 
     return { sent: false, skipped: true, reason: "mail_disabled" };
   }
 
-  return sendSmtpEmail({ to, subject, html, replyTo, attachments });
+  return sendResendEmail({ to, subject, html, replyTo, attachments });
 };
 
 // --- Blog Admin Auth ---
